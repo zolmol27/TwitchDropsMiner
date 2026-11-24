@@ -1,0 +1,92 @@
+{
+  "www.twitch.tv|": {
+    "auth-token": {
+      "key": "auth-token",
+      "value": "2k54oudktfww5395md2drquoayi5zy",
+      "coded_value": "2k54oudktfww5395md2drquoayi5zy",
+      "path": "/",
+      "domain": "www.twitch.tv",
+      "host_only": true
+    },
+    "persistent": {
+      "key": "persistent",
+      "value": "1361312102",
+      "coded_value": "1361312102",
+      "path": "/",
+      "domain": "www.twitch.tv",
+      "host_only": true
+    },
+    "twitch.lohp.countryCode": {
+      "key": "twitch.lohp.countryCode",
+      "value": "CH",
+      "coded_value": "CH",
+      "path": "/",
+      "domain": "www.twitch.tv",
+      "host_only": true
+    },
+    "server_session_id": {
+      "key": "server_session_id",
+      "value": "e71b0abaac9a4987b0c1a8d39e03121f",
+      "coded_value": "e71b0abaac9a4987b0c1a8d39e03121f",
+      "path": "/",
+      "domain": "www.twitch.tv",
+      "host_only": true
+    },
+    "unique_id": {
+      "key": "unique_id",
+      "value": "6f27b0a730e54ea8bbd07962c21c0bda",
+      "coded_value": "6f27b0a730e54ea8bbd07962c21c0bda",
+      "path": "/",
+      "domain": "www.twitch.tv",
+      "host_only": true
+    },
+    "unique_id_durable": {
+      "key": "unique_id_durable",
+      "value": "6f27b0a730e54ea8bbd07962c21c0bda",
+      "coded_value": "6f27b0a730e54ea8bbd07962c21c0bda",
+      "path": "/",
+      "domain": "www.twitch.tv",
+      "host_only": true
+    }
+  },
+  "twitch.tv|": {
+    "twitch.lohp.countryCode": {
+      "key": "twitch.lohp.countryCode",
+      "value": "CH",
+      "coded_value": "CH",
+      "path": "/",
+      "domain": "twitch.tv",
+      "expires_timestamp": 1829238891
+    },
+    "server_session_id": {
+      "key": "server_session_id",
+      "value": "b5852e7bcd6e4b4cb46f346c9aae2a6d",
+      "coded_value": "b5852e7bcd6e4b4cb46f346c9aae2a6d",
+      "path": "/",
+      "domain": "twitch.tv",
+      "secure": true,
+      "samesite": "none"
+    },
+    "unique_id": {
+      "key": "unique_id",
+      "value": "6f27b0a730e54ea8bbd07962c21c0bda",
+      "coded_value": "6f27b0a730e54ea8bbd07962c21c0bda",
+      "path": "/",
+      "domain": "twitch.tv",
+      "secure": true,
+      "samesite": "none",
+      "expires_timestamp": 1829670891
+    },
+    "unique_id_durable": {
+      "key": "unique_id_durable",
+      "value": "6f27b0a730e54ea8bbd07962c21c0bda",
+      "coded_value": "6f27b0a730e54ea8bbd07962c21c0bda",
+      "path": "/",
+      "domain": "twitch.tv",
+      "secure": true,
+      "httponly": true,
+      "samesite": "none",
+      "expires_timestamp": 1829670891
+    }
+  }
+}

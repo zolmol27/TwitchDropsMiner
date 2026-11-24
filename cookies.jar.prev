@@ -1,0 +1,92 @@
+{
+  "twitch.tv|": {
+    "server_session_id": {
+      "key": "server_session_id",
+      "value": "48e97ec8e2c64cd89bc19c13cba9279d",
+      "coded_value": "48e97ec8e2c64cd89bc19c13cba9279d",
+      "path": "/",
+      "domain": "twitch.tv",
+      "secure": true,
+      "samesite": "none"
+    },
+    "unique_id": {
+      "key": "unique_id",
+      "value": "bacbb77577d349869f26662db36fc00e",
+      "coded_value": "bacbb77577d349869f26662db36fc00e",
+      "path": "/",
+      "domain": "twitch.tv",
+      "secure": true,
+      "samesite": "none",
+      "expires_timestamp": 1825930619
+    },
+    "unique_id_durable": {
+      "key": "unique_id_durable",
+      "value": "bacbb77577d349869f26662db36fc00e",
+      "coded_value": "bacbb77577d349869f26662db36fc00e",
+      "path": "/",
+      "domain": "twitch.tv",
+      "secure": true,
+      "httponly": true,
+      "samesite": "none",
+      "expires_timestamp": 1825930619
+    },
+    "twitch.lohp.countryCode": {
+      "key": "twitch.lohp.countryCode",
+      "value": "CH",
+      "coded_value": "CH",
+      "path": "/",
+      "domain": "twitch.tv",
+      "expires_timestamp": 1825412219
+    }
+  },
+  "m.twitch.tv|": {
+    "server_session_id": {
+      "key": "server_session_id",
+      "value": "48e97ec8e2c64cd89bc19c13cba9279d",
+      "coded_value": "48e97ec8e2c64cd89bc19c13cba9279d",
+      "path": "/",
+      "domain": "m.twitch.tv",
+      "host_only": true
+    },
+    "unique_id": {
+      "key": "unique_id",
+      "value": "bacbb77577d349869f26662db36fc00e",
+      "coded_value": "bacbb77577d349869f26662db36fc00e",
+      "path": "/",
+      "domain": "m.twitch.tv",
+      "host_only": true
+    },
+    "unique_id_durable": {
+      "key": "unique_id_durable",
+      "value": "bacbb77577d349869f26662db36fc00e",
+      "coded_value": "bacbb77577d349869f26662db36fc00e",
+      "path": "/",
+      "domain": "m.twitch.tv",
+      "host_only": true
+    },
+    "twitch.lohp.countryCode": {
+      "key": "twitch.lohp.countryCode",
+      "value": "CH",
+      "coded_value": "CH",
+      "path": "/",
+      "domain": "m.twitch.tv",
+      "host_only": true
+    },
+    "auth-token": {
+      "key": "auth-token",
+      "value": "aomn06fu6whs95rej4txyubyo8w228",
+      "coded_value": "aomn06fu6whs95rej4txyubyo8w228",
+      "path": "/",
+      "domain": "m.twitch.tv",
+      "host_only": true
+    },
+    "persistent": {
+      "key": "persistent",
+      "value": "1361312102",
+      "coded_value": "1361312102",
+      "path": "/",
+      "domain": "m.twitch.tv",
+      "host_only": true
+    }
+  }
+}

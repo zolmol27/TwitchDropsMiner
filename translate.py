@@ -21,15 +21,17 @@ class StatusMessages(TypedDict):
     no_campaign: str
 
 
-class ChromeMessages(TypedDict):
+# LOCAL CHANGE 2026-11-07 (browser login v1): 'chrome' texts renamed to 'browser', as upstream.
+class BrowserMessages(TypedDict):
     startup: str
     login_to_complete: str
     no_token: str
     closed_window: str
+    not_found: str
 
 
 class LoginMessages(TypedDict):
-    chrome: ChromeMessages
+    browser: BrowserMessages
     error_code: str
     unexpected_content: str
     email_code_required: str
@@ -250,14 +252,18 @@ default_translation: Translation = {
             "Unexpected content type returned, usually due to being redirected. "
             "Do you need to login for internet access?"
         ),
-        "chrome": {
-            "startup": "Opening Chrome...",
+        "browser": {
+            "startup": "Opening the browser...",
             "login_to_complete": (
                 "Complete the login procedure manually by pressing the Login button again."
             ),
             "no_token": "No authorization token could be found.",
             "closed_window": (
-                "The Chrome window was closed before the login procedure could be completed."
+                "The browser window was closed before the login procedure could be completed."
+            ),
+            "not_found": (
+                "No compatible browser could be found. "
+                "Please install a compatible browser (Chrome, Edge, or Brave) and try again."
             ),
         },
         "error_code": "Login error code: {error_code}",
@@ -380,6 +386,20 @@ default_translation: Translation = {
                 "dark_mode": "Dark mode: ",
                 "priority_mode": "Priority mode: ",
                 "proxy": "Proxy (requires restart):",
+                # LOCAL CHANGE 2026-10-11/12: English texts for the interval setting and the smart shutdown timer.
+                "campaign_check": "Check for campaigns every: ",
+                "campaign_check_note": "Minimum 60 seconds. Click Confirm to save and refresh now.",
+                "campaign_confirm": "Confirm",
+                "minutes": "minutes",
+                "seconds": "seconds",
+                "shutdown_wait": "Shutdown timer (minutes): ",
+                "shutdown_start": "Start",
+                "shutdown_cancel": "Cancel",
+                "shutdown_on": "Shutdown: starting...",
+                "shutdown_off": "Shutdown: OFF",
+                "shutdown_running": "Shutdown in {}",
+                "shutdown_waiting": "Timer ended, waiting for mining to finish",
+                "shutdown_note": "After the timer, shuts down once nothing is being mined.",
             },
             "advanced": {
                 "name": "Advanced",

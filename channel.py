@@ -14,7 +14,7 @@ from yarl import URL
 
 from utils import Game, json_minify, isonow
 from exceptions import MinerException, RequestException
-from constants import CALL, GQL_QUERIES, ONLINE_DELAY, URLType, GQLQuery
+from constants import CALL, GQL_QUERIES, ONLINE_DELAY, URLType, GQLQuery, ClientType
 
 if TYPE_CHECKING:
     from twitch import Twitch
@@ -235,7 +235,10 @@ class Channel:
 
     @property
     def url(self) -> URLType:
-        return URLType(f"{self._twitch._client_type.CLIENT_URL}/{self._login}")
+        # Always the public web host, never the selected client's host: the Smart TV
+        # app shell lacks the beacon/settings fields needed to find the watch endpoint.
+        # LOCAL CHANGE 2026-10-11: always build watch URLs from the Web client (the Smart TV client lacks the needed fields).
+        return URLType(f"{ClientType.WEB.CLIENT_URL}/{self._login}")
 
     @property
     def iid(self) -> str:

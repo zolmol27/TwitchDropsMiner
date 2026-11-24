@@ -5,7 +5,7 @@ from typing import Any, TypedDict, TYPE_CHECKING
 from yarl import URL
 
 from utils import json_load, json_save
-from constants import SETTINGS_PATH, DEFAULT_LANG, PriorityMode
+from constants import SETTINGS_PATH, DEFAULT_LANG, CAMPAIGN_CHECK_DEFAULT_SECONDS, PriorityMode
 
 if TYPE_CHECKING:
     from main import ParsedArgs
@@ -23,6 +23,10 @@ class SettingsFile(TypedDict):
     enable_badges_emotes: bool
     available_drops_check: bool
     priority_mode: PriorityMode
+    # LOCAL CHANGE 2026-10-11/12: campaign interval (seconds) and shutdown keys (OFF by default).
+    campaign_check_interval: int
+    shutdown_when_done: bool
+    shutdown_wait_minutes: int
 
 
 default_settings: SettingsFile = {
@@ -37,6 +41,10 @@ default_settings: SettingsFile = {
     "enable_badges_emotes": False,
     "available_drops_check": False,
     "priority_mode": PriorityMode.PRIORITY_ONLY,
+    # LOCAL CHANGE 2026-10-11/12: defaults for the interval and shutdown settings.
+    "campaign_check_interval": CAMPAIGN_CHECK_DEFAULT_SECONDS,
+    "shutdown_when_done": False,
+    "shutdown_wait_minutes": 2,
 }
 
 
@@ -61,6 +69,10 @@ class Settings:
     enable_badges_emotes: bool
     available_drops_check: bool
     priority_mode: PriorityMode
+    # LOCAL CHANGE 2026-10-11/12: campaign interval (seconds) and shutdown keys (OFF by default).
+    campaign_check_interval: int
+    shutdown_when_done: bool
+    shutdown_wait_minutes: int
 
     PASSTHROUGH = ("_settings", "_args", "_altered")
 

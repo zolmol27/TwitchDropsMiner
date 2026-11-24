@@ -1,0 +1,27 @@
+{
+    "autostart_tray": true,
+    "available_drops_check": false,
+    "campaign_check_interval": 600,
+    "connection_quality": 1,
+    "dark_mode": false,
+    "enable_badges_emotes": false,
+    "exclude": {
+        "__type": "set",
+        "data": []
+    },
+    "language": "English",
+    "priority": [
+        "World of Tanks"
+    ],
+    "priority_mode": {
+        "__type": "PriorityMode",
+        "data": 0
+    },
+    "proxy": {
+        "__type": "URL",
+        "data": ""
+    },
+    "shutdown_wait_minutes": 60,
+    "shutdown_when_done": true,
+    "tray_notifications": true
+}

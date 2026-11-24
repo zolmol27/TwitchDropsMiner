@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re  # LOCAL CHANGE 2026-11-07 (browser login v1)
 import json
 import asyncio
 import logging
@@ -36,6 +37,7 @@ from utils import (
     timestamp,
     create_nonce,
     task_wrapper,
+    first_to_complete,  # LOCAL CHANGE 2026-11-07 (browser login v1)
     RateLimiter,
     AwaitableValue,
     ExponentialBackoff,
@@ -48,6 +50,8 @@ from constants import (
     MAX_CHANNELS,
     GQL_QUERIES,
     WATCH_INTERVAL,
+    CAMPAIGN_CHECK_DEFAULT_SECONDS,
+    CAMPAIGN_CHECK_MIN_SECONDS,
     State,
     ClientType,
     PriorityMode,
@@ -65,6 +69,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("TwitchDrops")
 gql_logger = logging.getLogger("TwitchDrops.gql")
+
+
+# LOCAL CHANGE 2026-10-11 (login fix): _mask/_diag write masked diagnostics to diag.log. see claude/change-report-2026-10-11.md, 'Earlier changes'.
+def _mask(token: object) -> str:
+    """Show only a secret's shape, so diag.log stays safe to share."""
+    text = str(token or "")
+    if not text:
+        return "<empty>"
+    return f"<len={len(text)} {text[:4]}...{text[-4:]}>"
+
+
+def _diag(label: str, data: object = "") -> None:
+    """Append a diagnostic line to diag.log. Always on, no CLI flag needed."""
+    import os
+    line = f"{datetime.now(timezone.utc):%H:%M:%S} | {label}: {data}"
+    try:
+        diag_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diag.log")
+        with open(diag_path, "a", encoding="utf-8") as file:
+            file.write(line + "\n")
+    except Exception:
+        pass
+    logger.info(f"DIAG {label}: {data}")
 
 
 class SkipExtraJsonDecoder(json.JSONDecoder):
@@ -118,6 +144,74 @@ class _AuthState:
         self._logged_in.clear()
         self._twitch.gui.help._invalidate_button.config(state="disabled")
 
+    # LOCAL CHANGE 2026-11-07 (browser login v1): ported from upstream commits 3f6f0ef + 99d12fd.
+    # Why: the SmartBox device-code login (2026-10-11) gave a token that Twitch refuses for the
+    # campaign list (ViewerDropsDashboard -> 401 Unauthorized, 1082 times in diag.log). Without that
+    # list the miner only saw campaigns already "in progress", so it never started World of Tanks
+    # by itself. Upstream now logs in through a browser window with the ANDROID_APP client ID.
+    # Needs: pip install zendriver, and Chrome, Edge or Brave installed. see claude/change-report-2026-10-11.md, 'browser login'.
+    async def _browser_login(self) -> str:
+        import zendriver
+
+        gui_print = self._twitch.gui.print
+        login_form: LoginForm = self._twitch.gui.login
+        client_info: ClientInfo = self._twitch._client_type
+        coro_unless_closed = self._twitch.gui.coro_unless_closed
+
+        if client_info.CLIENT_ID != ClientType.ANDROID_APP.CLIENT_ID:
+            # NOTE: The ANDROID_APP client uses "https://www.twitch.tv/" exactly
+            # as the redirect URL (including the trailing slash).
+            # Other clients may use different redirect URLs instead,
+            # but this would have to be tested first. This below is a reminder to do that first.
+            raise RuntimeError("Browser login has only been tested for the ANDROID_APP client")
+
+        while True:
+            gui_print(_("login", "browser", "startup"))
+            browser: zendriver.Browser | None = None
+            try:
+                browser = await zendriver.start()
+                await browser.get(
+                    f"https://www.twitch.tv/login?client_id={client_info.CLIENT_ID}&"
+                    f"redirect_params=client_id%3D{client_info.CLIENT_ID}%26"
+                    "redirect_uri%3Dhttps%253A%252F%252Fwww.twitch.tv%252F%26response_type%3Dtoken"
+                )
+
+                # wait for the user to navigate away from the URL, indicating successful login;
+                # alternatively, they can press on the login button again
+                async def url_waiter(browser=browser):
+                    while (
+                        await browser.test_connection()
+                        and browser.main_tab is not None
+                        and not str(browser.main_tab.url).startswith(
+                            "https://www.twitch.tv/#access_token="
+                        )
+                    ):
+                        await asyncio.sleep(0.5)
+
+                gui_print(_("login", "browser", "login_to_complete"))
+                await first_to_complete([
+                    url_waiter(),
+                    coro_unless_closed(login_form.wait_for_login_press()),
+                ])
+
+                # check if the browser window is still open
+                if await browser.test_connection() and browser.main_tab is not None:
+                    match = re.search(r'#access_token=(\w+)', str(browser.main_tab.url), re.I)
+                    if match is not None:
+                        return match.group(1)
+                    gui_print(_("login", "browser", "no_token"))
+                else:
+                    gui_print(_("login", "browser", "closed_window"))
+            except FileNotFoundError:
+                gui_print(_("login", "browser", "not_found"))
+            finally:
+                if browser is not None:
+                    await browser.stop()
+                    browser = None
+            await coro_unless_closed(login_form.wait_for_login_press())
+
+    # LOCAL CHANGE 2026-11-07 (browser login v1): the device-code login below is no longer called
+    # (see _browser_login above); kept so it can be switched back if needed.
     async def _oauth_login(self) -> str:
         login_form: LoginForm = self._twitch.gui.login
         client_info: ClientInfo = self._twitch._client_type
@@ -138,6 +232,14 @@ class _AuthState:
             "client_id": client_info.CLIENT_ID,
             "scopes": "",  # no scopes needed
         }
+        rejected_ids: set[str] = set()
+        # LOCAL CHANGE 2026-10-11 (login fix): if Twitch rejects a client ID as 'invalid client', try the next one.
+        client_candidates = [
+            ClientType.SMARTBOX,
+            ClientType.ANDROID_APP,
+            ClientType.WEB,
+            ClientType.MOBILE_WEB,
+        ]
         while True:
             try:
                 now = datetime.now(timezone.utc)
@@ -151,12 +253,52 @@ class _AuthState:
                     #     "user_code": "8 chars [A-Z]",
                     #     "verification_uri": "https://www.twitch.tv/activate?device-code=ABCDEFGH"
                     # }
-                    response_json: JsonType = await response.json()
+                    try:
+                        response_json: JsonType = await response.json(content_type=None)
+                    except Exception:
+                        response_json = {"raw": (await response.text())[:300]}
+                    if response.status != 200 or "device_code" not in response_json:
+                        if response_json.get("message") == "invalid client":
+                            # Twitch rejected this client ID; switch to another one and retry now
+                            rejected_ids.add(self._twitch._client_type.CLIENT_ID)
+                            remaining = [
+                                ct for ct in client_candidates if ct.CLIENT_ID not in rejected_ids
+                            ]
+                            if remaining:
+                                new_client = remaining[0]
+                                logger.warning(
+                                    f"Client ID rejected, switching to {new_client.CLIENT_ID}"
+                                )
+                                self._twitch._client_type = new_client
+                                client_info = new_client
+                                headers.update({
+                                    "Client-Id": new_client.CLIENT_ID,
+                                    "Origin": str(new_client.CLIENT_URL),
+                                    "Referer": str(new_client.CLIENT_URL),
+                                    "User-Agent": new_client.USER_AGENT,
+                                })
+                                payload["client_id"] = new_client.CLIENT_ID
+                                continue
+                        # Twitch rejected the device-code request; show why instead of crashing
+                        logger.error(
+                            f"Device code request failed ({response.status}): {response_json}"
+                        )
+                        self._twitch.gui.print(
+                            f"Login request failed (HTTP {response.status}): "
+                            f"{response_json}. Retrying in 30s..."
+                        )
+                        await asyncio.sleep(30)
+                        continue
                     device_code: str = response_json["device_code"]
                     user_code: str = response_json["user_code"]
                     interval: int = response_json["interval"]
                     verification_uri: URL = URL(response_json["verification_uri"])
                     expires_at = now + timedelta(seconds=response_json["expires_in"])
+                    _diag(
+                        "device_code_ok",
+                        f"client_id={self._twitch._client_type.CLIENT_ID} "
+                        f"user_code={user_code} interval={interval} uri={verification_uri}",
+                    )
 
                 # Print the code to the user, open them the activate page so they can type it in
                 await login_form.ask_enter_code(verification_uri, user_code)
@@ -187,6 +329,17 @@ class _AuthState:
                         #     "token_type": "bearer"
                         # }
                         self.access_token = cast(str, response_json["access_token"])
+                        # tell the user straight away; validation still has to run
+                        login_form.update(_("gui", "login", "logging_in"), None)
+                        self._twitch.print("Activation code accepted, finishing login...")
+                        _diag(
+                            "token_granted",
+                            f"client_id={self._twitch._client_type.CLIENT_ID} "
+                            f"token={_mask(self.access_token)} "
+                            f"token_type={response_json.get('token_type')} "
+                            f"scope={response_json.get('scope')} "
+                            f"keys={sorted(response_json.keys())}",
+                        )
                         return self.access_token
             except RequestInvalid:
                 # the device_code has expired, request a new code
@@ -331,8 +484,10 @@ class _AuthState:
             return self.access_token
         raise LoginException("Login flow finished without setting the access token")
 
-    def headers(self, *, user_agent: str = '', gql: bool = False) -> JsonType:
-        client_info: ClientInfo = self._twitch._client_type
+    def headers(
+        self, *, user_agent: str = '', gql: bool = False, client: ClientInfo | None = None
+    ) -> JsonType:
+        client_info: ClientInfo = client or self._twitch._client_type
         headers = {
             "Accept": "*/*",
             "Accept-Encoding": "gzip",
@@ -388,8 +543,11 @@ class _AuthState:
                 for invalid_token_attempt in range(2):
                     cookie = jar.filter_cookies(client_info.CLIENT_URL)
                     if "auth-token" not in cookie:
-                        self.access_token = await self._oauth_login()
+                        # LOCAL CHANGE 2026-11-07 (browser login v1): was self._oauth_login()
+                        self.access_token = await self._browser_login()
                         cookie["auth-token"] = self.access_token
+                        # (kept from the device-code login, harmless here)
+                        client_info = self._twitch._client_type
                     elif not hasattr(self, "access_token"):
                         logger.info("Restoring session from cookie")
                         self.access_token = cookie["auth-token"].value
@@ -407,6 +565,15 @@ class _AuthState:
                             continue
                         elif response.status == 200:
                             validate_response = await response.json()
+                            _diag(
+                                "validate_ok",
+                                f"token_client_id={validate_response.get('client_id')} "
+                                f"selected_client_id={client_info.CLIENT_ID} "
+                                f"login={validate_response.get('login')} "
+                                f"user_id={validate_response.get('user_id')} "
+                                f"scopes={validate_response.get('scopes')} "
+                                f"expires_in={validate_response.get('expires_in')}",
+                            )
                             break
                 else:
                     raise RuntimeError("Login verification failure (step #2)")
@@ -445,9 +612,24 @@ class Twitch:
         # Do not modify the default, safe values.
         self._qgl_limiter = RateLimiter(capacity=5, window=1)
         # Client type, session and auth
+        # LOCAL CHANGE 2026-11-07 (browser login v1): back to ANDROID_APP, same as upstream.
+        # History: 2026-10-11 switched to SMARTBOX for the device-code login, but SmartBox tokens
+        # are refused for the campaign list (401). The browser login uses ANDROID_APP.
         self._client_type: ClientInfo = ClientType.ANDROID_APP
         self._session: aiohttp.ClientSession | None = None
         self._auth_state: _AuthState = _AuthState(self)
+        # LOCAL CHANGE 2026-10-12 (smart shutdown v4): shutdown timer state. Must be set BEFORE
+        # the GUI is created, because the Settings countdown reads it (v3 crashed with
+        # AttributeError '_shutdown_deadline'). see claude/change-report-2026-10-11.md.
+        # True while a Windows shutdown countdown started by the miner is pending
+        self._shutdown_scheduled: bool = False
+        # when the user's shutdown timer ends (None = no timer running)
+        self._shutdown_deadline: datetime | None = None
+        self._shutdown_waiting_logged: bool = False
+        # True after "nothing to mine" was seen once after the timer; a second, fresh check confirms
+        self._shutdown_confirm_pending: bool = False
+        # timer that triggers a fresh campaign check (end of timer, or the confirm re-check)
+        self._shutdown_recheck: asyncio.TimerHandle | None = None
         # GUI
         self.gui = GUIManager(self)
         # Storing and watching channels
@@ -688,6 +870,8 @@ class Twitch:
                     ):
                         # non-excluded games with no priority are placed last, below priority ones
                         self.wanted_games.append(game)
+                # LOCAL CHANGE 2026-10-12 (smart shutdown v4): decide about shutdown after every campaign check.
+                self.update_shutdown_state()
                 full_cleanup = True
                 self.restart_watching()
                 self.change_state(State.CHANNELS_CLEANUP)
@@ -957,10 +1141,22 @@ class Twitch:
                         logger.log(CALL, "No active drop could be determined")
             await self._watch_sleep(interval - min(time() - last_sent, interval))
 
+    # LOCAL CHANGE 2026-10-11 (campaign interval setting): upstream waited a fixed 1 hour. see claude/change-report-2026-10-11.md, 'Campaign check interval setting'.
+    def _campaign_check_interval(self) -> timedelta:
+        """
+        How long to wait before the next campaign check (inventory fetch).
+        Set in the Settings tab, never shorter than CAMPAIGN_CHECK_MIN_SECONDS.
+        """
+        try:
+            seconds = int(self.settings.campaign_check_interval)
+        except (TypeError, ValueError):
+            seconds = CAMPAIGN_CHECK_DEFAULT_SECONDS
+        return timedelta(seconds=max(CAMPAIGN_CHECK_MIN_SECONDS, seconds))
+
     @task_wrapper(critical=True)
     async def _maintenance_task(self) -> None:
         now = datetime.now(timezone.utc)
-        next_period = now + timedelta(hours=1)
+        next_period = now + self._campaign_check_interval()
         while True:
             # exit if there's no need to repeat the loop
             now = datetime.now(timezone.utc)
@@ -1288,15 +1484,19 @@ class Twitch:
                 await asyncio.wait_for(self.gui.wait_until_closed(), timeout=delay)
 
     @overload
-    async def gql_request(self, ops: GQLOperation) -> JsonType:
+    async def gql_request(
+        self, ops: GQLOperation, *, client: ClientInfo | None = None
+    ) -> JsonType:
         ...
 
     @overload
-    async def gql_request(self, ops: list[GQLOperation]) -> list[JsonType]:
+    async def gql_request(
+        self, ops: list[GQLOperation], *, client: ClientInfo | None = None
+    ) -> list[JsonType]:
         ...
 
     async def gql_request(
-        self, ops: GQLOperation | list[GQLOperation]
+        self, ops: GQLOperation | list[GQLOperation], *, client: ClientInfo | None = None
     ) -> JsonType | list[JsonType]:
         gql_logger.debug(f"GQL Request: {ops}")
         backoff = ExponentialBackoff(maximum=60)
@@ -1309,7 +1509,11 @@ class Twitch:
                     "POST",
                     "https://gql.twitch.tv/gql",
                     json=ops,
-                    headers=auth_state.headers(user_agent=self._client_type.USER_AGENT, gql=True),
+                    headers=auth_state.headers(
+                        user_agent=(client or self._client_type).USER_AGENT,
+                        gql=True,
+                        client=client,
+                    ),
                 ) as response:
                     response_json: JsonType | list[JsonType] = await response.json()
             gql_logger.debug(f"GQL Response: {response_json}")
@@ -1363,6 +1567,17 @@ class Twitch:
                         raise GQLException(response_json['errors'])
                 # Other error handling
                 elif "error" in response_json:
+                    _diag(
+                        "gql_error",
+                        f"error={response_json.get('error')} "
+                        f"status={response_json.get('status')} "
+                        f"message={response_json.get('message')} "
+                        f"sent_client_id={self._client_type.CLIENT_ID} "
+                        f"sent_token={_mask(getattr(self._auth_state, 'access_token', ''))} "
+                        f"sent_device_id={getattr(self._auth_state, 'device_id', '<none>')} "
+                        f"session_id={getattr(self._auth_state, 'session_id', '<none>')} "
+                        f"ops={str(ops)[:300]}",
+                    )
                     raise GQLException(
                         f"{response_json['error']}: {response_json['message']}"
                     )
@@ -1394,7 +1609,7 @@ class Twitch:
         return merged
 
     async def fetch_campaigns(
-        self, campaigns_chunk: list[tuple[str, JsonType]]
+        self, campaigns_chunk: list[tuple[str, JsonType]], client: ClientInfo | None = None
     ) -> dict[str, JsonType]:
         campaign_ids: dict[str, JsonType] = dict(campaigns_chunk)
         auth_state = await self.get_auth()
@@ -1404,7 +1619,8 @@ class Twitch:
                     {"channelLogin": str(auth_state.user_id), "dropID": cid}
                 )
                 for cid in campaign_ids
-            ]
+            ],
+            client=client,
         )
         fetched_data: dict[str, JsonType] = {
             (campaign_data := response_json["data"]["user"]["dropCampaign"])["id"]: campaign_data
@@ -1412,11 +1628,291 @@ class Twitch:
         }
         return self._merge_data(campaign_ids, fetched_data)
 
+    # LOCAL CHANGE 2026-10-12: per-game campaign scan summary in the output log.
+    def _report_campaigns(self, campaigns: list[DropsCampaign]) -> None:
+        """
+        Report what the campaign scan found, grouped per game, so that a game with
+        nothing currently active is called out instead of silently mining nothing.
+        """
+        try:
+            total = len(campaigns)
+            if not total:
+                self.print("Campaign scan: no campaigns found at all.")
+                return
+            per_game: dict[str, dict[str, int]] = {}
+            for campaign in campaigns:
+                stats = per_game.setdefault(
+                    campaign.game.name,
+                    {"total": 0, "active": 0, "upcoming": 0, "minable": 0},
+                )
+                stats["total"] += 1
+                if campaign.active:
+                    stats["active"] += 1
+                    if campaign.eligible and not campaign.finished:
+                        stats["minable"] += 1
+                elif campaign.upcoming:
+                    stats["upcoming"] += 1
+            active_total = sum(s["active"] for s in per_game.values())
+            minable_total = sum(s["minable"] for s in per_game.values())
+            games = len(per_game)
+            self.print(
+                f"Campaign scan: {total} campaign{'' if total == 1 else 's'} across "
+                f"{games} game{'' if games == 1 else 's'} - "
+                f"{active_total} active, {minable_total} minable now."
+            )
+            exclude: set[str] = self.settings.exclude
+            priority: list[str] = self.settings.priority
+            # detail the games the user actually asked for; with no priority list,
+            # show the ones that have something active, capped so the log stays readable
+            listed = [game for game in priority if game not in exclude]
+            capped = False
+            if not listed:
+                with_active = sorted(
+                    (game for game, s in per_game.items() if s["active"] and game not in exclude)
+                )
+                capped = len(with_active) > 12
+                listed = with_active[:12]
+            for game_name in listed:
+                stats = per_game.get(game_name)
+                if stats is None:
+                    self.print(f"  {game_name}: no campaigns found at all")
+                elif not stats["active"]:
+                    upcoming = f", {stats['upcoming']} upcoming" if stats["upcoming"] else ""
+                    self.print(
+                        f"  {game_name}: NO active campaign "
+                        f"out of {stats['total']} found{upcoming}"
+                    )
+                elif not stats["minable"]:
+                    self.print(
+                        f"  {game_name}: {stats['active']} active of {stats['total']}, "
+                        "but none minable (account not linked, or all drops finished)"
+                    )
+                else:
+                    self.print(
+                        f"  {game_name}: {stats['minable']} minable "
+                        f"of {stats['active']} active ({stats['total']} total)"
+                    )
+            if capped:
+                self.print("  ... and more games with active campaigns (showing 12).")
+            if not active_total:
+                self.print(f"No active campaigns out of {total} found.")
+            elif not minable_total:
+                self.print(
+                    f"No minable campaigns: {active_total} are active, but none can be "
+                    "mined right now (check account links)."
+                )
+        except Exception:
+            # a reporting problem must never stop the miner
+            logger.exception("Campaign report failed")
+
+    # LOCAL CHANGE 2026-10-12 (client fallback v1): if the campaign list is empty, try other client IDs. see claude/change-report-2026-10-11.md, 'safe client fallback'.
+    @staticmethod
+    def _client_label(client: ClientInfo) -> str:
+        for name, value in vars(ClientType).items():
+            if value is client:
+                return name
+        return client.CLIENT_ID
+
+    async def _find_campaign_client(self) -> tuple[ClientInfo, list[JsonType]]:
+        """
+        Fetch the campaign list with the current client ID. If it has no active or
+        upcoming campaigns, try the other client IDs one at a time and use the first
+        one that has some. Normally this is a single request; the extra requests only
+        happen when the list comes back empty.
+        """
+        current = self._client_type
+        others = [
+            client for client in (
+                ClientType.ANDROID_APP, ClientType.WEB, ClientType.MOBILE_WEB, ClientType.SMARTBOX,
+            )
+            if client is not current
+        ]
+        # LOCAL CHANGE 2026-11-07 (client fallback v2): a refused campaign list (for example
+        # 401 Unauthorized) no longer stops the whole fetch silently. It is shown in the log,
+        # the other clients are tried, and the inventory still loads. v1 let the error propagate.
+        try:
+            response = await self.gql_request(GQL_QUERIES["Campaigns"], client=current)
+            available: list[JsonType] = response["data"]["currentUser"]["dropCampaigns"] or []
+        except GQLException as exc:
+            available = []
+            self.print(
+                f"Twitch refused the campaign list ({exc}). New campaigns can't be found "
+                "until this works; if it keeps happening, log out and log in again."
+            )
+        if any(c["status"] in ("ACTIVE", "UPCOMING") for c in available):
+            return current, available
+        for client in others:
+            try:
+                response = await self.gql_request(GQL_QUERIES["Campaigns"], client=client)
+                found: list[JsonType] = response["data"]["currentUser"]["dropCampaigns"] or []
+            except Exception as exc:
+                logger.warning(
+                    f"Campaign list failed for client {self._client_label(client)}: {exc}"
+                )
+                continue
+            if any(c["status"] in ("ACTIVE", "UPCOMING") for c in found):
+                self.print(
+                    f"Campaign list was empty with {self._client_label(current)}; "
+                    f"found campaigns with {self._client_label(client)}, using that."
+                )
+                return client, found
+        return current, available
+
+    # LOCAL CHANGE 2026-10-12 (smart shutdown v4). History: v1 checkbox+Confirm, Windows countdown at once;
+    # v2 wait started after all priority drops claimed; v3 OFF by default, Start button, visible timer;
+    # v4 fixes the startup crash, "nothing to mine" = the miner is not mining anything, and a second
+    # fresh campaign check confirms it before shutdown. see claude/change-report-2026-10-11.md.
+    def _nothing_to_mine(self) -> bool:
+        """
+        True if the miner is not mining anything: no active, unfinished campaign for any game
+        the miner wants to watch right now.
+        """
+        return not any(
+            c.active and not c.finished and c.game in self.wanted_games for c in self.inventory
+        )
+
+    @property
+    def shutdown_deadline(self) -> datetime | None:
+        return self._shutdown_deadline
+
+    def shutdown_seconds_left(self) -> int | None:
+        """Seconds until the shutdown timer ends, or None if no timer is running."""
+        if self._shutdown_deadline is None:
+            return None
+        left = (self._shutdown_deadline - datetime.now(timezone.utc)).total_seconds()
+        return max(0, int(left))
+
+    def _cancel_shutdown_recheck(self) -> None:
+        if self._shutdown_recheck is not None:
+            self._shutdown_recheck.cancel()
+            self._shutdown_recheck = None
+
+    def _schedule_shutdown_check(self, seconds: float) -> None:
+        """Run a fresh campaign check (same as Reload) after the given number of seconds."""
+        self._cancel_shutdown_recheck()
+        loop = asyncio.get_running_loop()
+        self._shutdown_recheck = loop.call_later(
+            max(1.0, seconds), self.change_state, State.INVENTORY_FETCH
+        )
+
+    def start_shutdown_timer(self) -> bool:
+        """
+        Started by the Start button in Settings. Sets the timer to the minutes in Settings and
+        logs it. When the timer ends, a fresh campaign check decides whether Windows shuts down.
+        """
+        import sys
+        if sys.platform != "win32":
+            self.print("Automatic shutdown only works on Windows; nothing was changed.")
+            return False
+        minutes = max(1, int(self.settings.shutdown_wait_minutes))
+        self.settings.shutdown_when_done = True
+        self._shutdown_scheduled = False
+        self._shutdown_waiting_logged = False
+        self._shutdown_confirm_pending = False
+        self._shutdown_deadline = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        self._schedule_shutdown_check(minutes * 60)
+        self.print(
+            f"Shutdown timer started: {minutes} minutes until shutdown. When the timer ends, "
+            "Windows shuts down if nothing is being mined; otherwise it waits until mining is "
+            "finished, checks again, and then shuts down."
+        )
+        return True
+
+    def update_shutdown_state(self) -> None:
+        """
+        Called after every campaign check (Reload, the interval timer, claimed drops).
+        1. Timer still running: only log the minutes left. Checks keep running as normal.
+        2. Timer ended, mining is going on: wait. Nothing else happens until mining is finished.
+        3. Timer ended, nothing to mine: run one more fresh campaign check a few seconds later.
+        4. That fresh check also finds nothing to mine: start the Windows shutdown (60 seconds).
+        If mining starts again at any point, step 3 starts over.
+        """
+        import subprocess
+        import sys
+        try:
+            if sys.platform != "win32":
+                return
+            nothing_to_mine = self._nothing_to_mine()
+            if self._shutdown_scheduled:
+                # Windows is already counting down; only cancel if mining started again
+                if not nothing_to_mine:
+                    self.cancel_shutdown()
+                    self.print("Shutdown cancelled: mining started again.")
+                return
+            if not self.settings.shutdown_when_done:
+                return  # OFF: nothing happens until the Start button is pressed
+            if self._shutdown_deadline is None:
+                # armed in settings.json but not started in this run: start the timer now
+                self.start_shutdown_timer()
+                return
+            left = self.shutdown_seconds_left() or 0
+            if left > 0:
+                minutes_left = -(-left // 60)
+                mining = "nothing is being mined" if nothing_to_mine else "mining is going on"
+                self.print(f"{minutes_left} minutes until shutdown ({mining} right now).")
+                return
+            if not nothing_to_mine:
+                self._shutdown_confirm_pending = False
+                if not self._shutdown_waiting_logged:
+                    self.print(
+                        "Shutdown timer has ended, but mining is going on. "
+                        "Waiting until it is finished, then checking again."
+                    )
+                    self._shutdown_waiting_logged = True
+                return
+            if not self._shutdown_confirm_pending:
+                self._shutdown_confirm_pending = True
+                self.print("Nothing is being mined. Checking the campaigns once more before shutdown...")
+                self._schedule_shutdown_check(10)
+                return
+            # the timer has ended and two campaign checks in a row found nothing to mine
+            subprocess.run(
+                ["shutdown", "/s", "/t", "60", "/c",
+                 "Nothing is being mined. Shutting down."],
+                check=False,
+            )
+            self._shutdown_scheduled = True
+            self._shutdown_deadline = None
+            self._shutdown_waiting_logged = False
+            self._shutdown_confirm_pending = False
+            self._cancel_shutdown_recheck()
+            self.settings.shutdown_when_done = False
+            self.print(
+                "Checked again: nothing to mine. Windows shuts down in 60 seconds. "
+                "Use Cancel shutdown in Settings to stop it."
+            )
+        except Exception:
+            # a shutdown problem must never stop the miner
+            logger.exception("Automatic shutdown check failed")
+
+    def cancel_shutdown(self) -> None:
+        """Stop the timer, and any Windows countdown started by the miner."""
+        import subprocess
+        import sys
+        was_armed = self.settings.shutdown_when_done
+        self.settings.shutdown_when_done = False
+        self._shutdown_deadline = None
+        self._shutdown_waiting_logged = False
+        self._shutdown_confirm_pending = False
+        self._cancel_shutdown_recheck()
+        if sys.platform != "win32":
+            return
+        result = subprocess.run(["shutdown", "/a"], capture_output=True, check=False)
+        was_scheduled = self._shutdown_scheduled
+        self._shutdown_scheduled = False
+        if was_scheduled or result.returncode == 0:
+            self.print("Shutdown cancelled.")
+        elif was_armed:
+            self.print("Shutdown timer stopped.")
+
     async def fetch_inventory(self) -> None:
         status_update = self.gui.status.update
         status_update(_("gui", "status", "fetching_inventory"))
+        # the campaign list decides which client ID is used for this whole fetch
+        # LOCAL CHANGE 2026-10-12 (client fallback v1): pick the client once for this whole fetch.
+        client, available_list = await self._find_campaign_client()
         # fetch in-progress campaigns (inventory)
-        response = await self.gql_request(GQL_QUERIES["Inventory"])
+        response = await self.gql_request(GQL_QUERIES["Inventory"], client=client)
         inventory: JsonType = response["data"]["currentUser"]["inventory"]
         ongoing_campaigns: list[JsonType] = inventory["dropCampaignsInProgress"] or []
         # this contains claimed benefit edge IDs, not drop IDs
@@ -1424,9 +1920,7 @@ class Twitch:
             b["id"]: timestamp(b["lastAwardedAt"]) for b in inventory["gameEventDrops"]
         }
         inventory_data: dict[str, JsonType] = {c["id"]: c for c in ongoing_campaigns}
-        # fetch general available campaigns data (campaigns)
-        response = await self.gql_request(GQL_QUERIES["Campaigns"])
-        available_list: list[JsonType] = response["data"]["currentUser"]["dropCampaigns"] or []
+        # the available campaigns list was already fetched by _find_campaign_client
         applicable_statuses = ("ACTIVE", "UPCOMING")
         available_campaigns: dict[str, JsonType] = {
             c["id"]: c
@@ -1436,7 +1930,7 @@ class Twitch:
         # fetch detailed data for each campaign, in chunks
         status_update(_("gui", "status", "fetching_campaigns"))
         fetch_campaigns_tasks: list[asyncio.Task[Any]] = [
-            asyncio.create_task(self.fetch_campaigns(campaigns_chunk))
+            asyncio.create_task(self.fetch_campaigns(campaigns_chunk, client=client))
             for campaigns_chunk in chunk(available_campaigns.items(), 20)
         ]
         try:
@@ -1486,6 +1980,7 @@ class Twitch:
         campaigns.sort(key=lambda c: c.active, reverse=True)
         campaigns.sort(key=lambda c: c.upcoming and c.starts_at or c.ends_at)
         campaigns.sort(key=lambda c: c.eligible, reverse=True)
+        self._report_campaigns(campaigns)
 
         self._drops.clear()
         self.gui.inv.clear()

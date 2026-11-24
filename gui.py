@@ -38,6 +38,7 @@ from cache import ImageCache
 from exceptions import MinerException, ExitRequest
 from utils import resource_path, set_root_icon, webopen, task_wrapper, Game, _T
 from constants import (
+    CAMPAIGN_CHECK_MIN_SECONDS,
     MAX_INT,
     SELF_PATH,
     IS_PACKAGED,
@@ -602,6 +603,10 @@ class LoginForm:
         self._manager.print(_("gui", "login", "request"))
         await self.wait_for_login_press()
         self._manager.print(f"Enter this code on the Twitch's device activation page: {user_code}")
+        # keep the code and the waiting state visible in the login box itself,
+        # otherwise the form still reads "login required" while we poll Twitch
+        # LOCAL CHANGE 2026-10-11 (login fix): show that the app is waiting for the code to be activated.
+        self.update(f"Code: {user_code}\nWaiting for activation...", None)
         await asyncio.sleep(4)
         webopen(page_url)
 
@@ -1699,6 +1704,96 @@ class SettingsPanel:
         self._proxy.config(validatecommand=partial(proxy_validate, self._proxy, self._settings))
         self._proxy.grid(column=0, row=1)
 
+        # LOCAL CHANGE 2026-10-11 (campaign interval setting): number + unit + Confirm. see claude/change-report-2026-10-11.md.
+        # campaign check interval frame
+        interval_frame = ttk.Frame(general_center)
+        interval_frame.grid(column=0, row=3)
+        ttk.Label(
+            interval_frame, text=_("gui", "settings", "general", "campaign_check")
+        ).grid(column=0, row=0)
+        self._campaign_units: dict[str, int] = {
+            _("gui", "settings", "general", "minutes"): 60,
+            _("gui", "settings", "general", "seconds"): 1,
+        }
+        saved_seconds = max(
+            CAMPAIGN_CHECK_MIN_SECONDS, int(self._settings.campaign_check_interval)
+        )
+        if saved_seconds % 60 == 0:
+            campaign_value = saved_seconds // 60
+            campaign_unit = _("gui", "settings", "general", "minutes")
+        else:
+            campaign_value = saved_seconds
+            campaign_unit = _("gui", "settings", "general", "seconds")
+        self._campaign_value = StringVar(master, str(campaign_value))
+        self._campaign_unit = StringVar(master, campaign_unit)
+        self._campaign_factor: int = self._campaign_units[campaign_unit]
+        self._campaign_spin = ttk.Spinbox(
+            interval_frame,
+            from_=1,
+            to=99999,
+            width=6,
+            textvariable=self._campaign_value,
+        )
+        self._campaign_spin.grid(column=1, row=0, padx=4)
+        SelectCombobox(
+            interval_frame,
+            values=list(self._campaign_units),
+            textvariable=self._campaign_unit,
+            command=lambda e: self.on_campaign_unit_change(),
+            width=10,
+        ).grid(column=2, row=0)
+        ttk.Button(
+            interval_frame,
+            text=_("gui", "settings", "general", "campaign_confirm"),
+            command=self.confirm_campaign_interval,
+        ).grid(column=3, row=0, padx=4)
+        ttk.Label(
+            interval_frame,
+            text=_("gui", "settings", "general", "campaign_check_note"),
+            foreground="gray",
+        ).grid(column=0, row=1, columnspan=4)
+
+        # LOCAL CHANGE 2026-10-12 (smart shutdown v4 + layout fix): minutes box, Start, Cancel, live countdown.
+        # Layout fix: short texts, the note wraps, and the countdown line has a fixed width, so this
+        # block no longer stretches the General column (v3 texts were too long). see claude/change-report-2026-10-11.md.
+        # automatic shutdown block
+        shutdown_frame = ttk.Frame(general_center)
+        shutdown_frame.grid(column=0, row=4)
+        self._shutdown_minutes = StringVar(
+            master, str(int(self._settings.shutdown_wait_minutes))
+        )
+        ttk.Label(
+            shutdown_frame, text=_("gui", "settings", "general", "shutdown_wait")
+        ).grid(column=0, row=0)
+        ttk.Spinbox(
+            shutdown_frame,
+            from_=1,
+            to=240,
+            width=6,
+            textvariable=self._shutdown_minutes,
+        ).grid(column=1, row=0, padx=4)
+        ttk.Button(
+            shutdown_frame,
+            text=_("gui", "settings", "general", "shutdown_start"),
+            command=self.start_shutdown,
+        ).grid(column=2, row=0, padx=4)
+        ttk.Button(
+            shutdown_frame,
+            text=_("gui", "settings", "general", "shutdown_cancel"),
+            command=self.cancel_shutdown,
+        ).grid(column=3, row=0, padx=4)
+        ttk.Label(
+            shutdown_frame,
+            text=_("gui", "settings", "general", "shutdown_note"),
+            foreground="gray",
+            wraplength=300,
+            justify="center",
+        ).grid(column=0, row=1, columnspan=4)
+        # fixed width so the line doesn't resize the window every second while counting down
+        self._shutdown_status = ttk.Label(shutdown_frame, text="", width=40, anchor="center")
+        self._shutdown_status.grid(column=0, row=2, columnspan=4)
+        self._refresh_shutdown_status()
+
         # Advanced section
         advanced_frame = ttk.LabelFrame(
             center_frame, padding=(4, 0, 4, 4), text=_("gui", "settings", "advanced", "name")
@@ -1844,6 +1939,79 @@ class SettingsPanel:
             text=_("gui", "settings", "reload"),
             command=self._manager._twitch.state_change(State.INVENTORY_FETCH),
         ).grid(column=1, row=0)
+
+    # LOCAL CHANGE 2026-10-11 (campaign interval setting): unit switch keeps the total time.
+    def on_campaign_unit_change(self) -> None:
+        """Convert the number to the newly chosen unit, keeping the same total time."""
+        new_factor = self._campaign_units.get(self._campaign_unit.get())
+        if new_factor is None or new_factor == self._campaign_factor:
+            return
+        try:
+            amount = int(float(self._campaign_spin.get()))
+        except ValueError:
+            amount = 0
+        total = amount * self._campaign_factor
+        self._campaign_factor = new_factor
+        self._campaign_value.set(str(max(1, total // new_factor)))
+
+    # LOCAL CHANGE 2026-10-11 (campaign interval setting): save, log, and refresh like Reload.
+    def confirm_campaign_interval(self) -> None:
+        """Save the campaign check interval, log it, then refresh the campaigns (same as Reload)."""
+        factor = self._campaign_units.get(self._campaign_unit.get(), self._campaign_factor)
+        try:
+            amount = int(float(self._campaign_spin.get()))
+        except ValueError:
+            amount = 0
+        requested = amount * factor
+        seconds = max(CAMPAIGN_CHECK_MIN_SECONDS, requested)
+        self._settings.campaign_check_interval = seconds
+        self._campaign_factor = factor
+        # show the value that was actually saved (after the minimum is applied)
+        self._campaign_value.set(str(seconds // factor))
+        twitch = self._manager._twitch
+        if seconds != requested:
+            twitch.print(
+                f"Campaign check interval: {requested} seconds is below the minimum, "
+                f"using {seconds} seconds."
+            )
+        label = f"{seconds // 60} minutes" if seconds % 60 == 0 else f"{seconds} seconds"
+        twitch.print(f"Campaign check interval changed to {label}. Refreshing campaigns now.")
+        # same as the Reload button; the countdown restarts with the new interval afterwards
+        twitch.change_state(State.INVENTORY_FETCH)
+
+    # LOCAL CHANGE 2026-10-12 (smart shutdown v3): Start/Cancel buttons and the countdown line.
+    def start_shutdown(self) -> None:
+        """Start button: save the minutes, then start the timer in the miner."""
+        try:
+            minutes = int(float(self._shutdown_minutes.get()))
+        except ValueError:
+            minutes = 2
+        minutes = min(240, max(1, minutes))
+        self._settings.shutdown_wait_minutes = minutes
+        self._shutdown_minutes.set(str(minutes))
+        self._manager._twitch.start_shutdown_timer()
+        self._refresh_shutdown_status()
+
+    def cancel_shutdown(self) -> None:
+        self._manager._twitch.cancel_shutdown()
+        self._refresh_shutdown_status()
+
+    def _refresh_shutdown_status(self) -> None:
+        """Show the shutdown state and the countdown; repeats every second."""
+        twitch = self._manager._twitch
+        left = twitch.shutdown_seconds_left()
+        if not self._settings.shutdown_when_done:
+            text = _("gui", "settings", "general", "shutdown_off")
+        elif left is None:
+            text = _("gui", "settings", "general", "shutdown_on")
+        elif left > 0:
+            text = _("gui", "settings", "general", "shutdown_running").format(
+                f"{left // 60:02d}:{left % 60:02d}"
+            )
+        else:
+            text = _("gui", "settings", "general", "shutdown_waiting")
+        self._shutdown_status.config(text=text)
+        self._shutdown_status.after(1000, self._refresh_shutdown_status)
 
     def clear_selection(self) -> None:
         self._priority_list.selection_clear(0, "end")
